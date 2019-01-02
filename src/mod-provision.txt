@@ -1,0 +1,519 @@
+#Provision module script
+#Script permissions: read, write
+#Script dependencies: none
+
+#Declare scripts version
+global scriptsVersion "1.0.0"
+
+#If the scheduler entry for the initialization of the provision module doesn't exist
+if ([/system scheduler find name=init-provision]="") do={
+	#Add it
+	/system scheduler add name=init-provision start-time=startup on-event={delay 10;/system script run mod-provision;global provision;$provision auto}
+}
+
+#Provision function
+global provision do={
+	#Configuration parser subfunction
+	#Inputs: <Config attribute>
+	#Output: <Config value>
+	local parseConfig do={
+		#Pull the configuration file contents
+		local cfgFileContent [/file get value-name=contents [find name~([/system identity get value-name=name].".cfg")]]
+
+		#Declare helper pointers
+		local cfgLineStart 0
+		local cfgLineEnd 0
+
+		#Iterate through the configuration file contents
+		do {
+			#Find out where the line ends
+			set cfgLineEnd [find $cfgFileContent "\r\n" $cfgLineStart]
+
+			#If a carriage return and new line cannot be found
+			if ([typeof $cfgLineEnd]!="num") do={
+				#Adjust the line end to the end of contents
+				set cfgLineEnd [len $cfgFileContent]
+			}
+
+			#Fetch the line
+			local cfgLine [pick $cfgFileContent $cfgLineStart $cfgLineEnd]
+
+			#Pull the configuration attribute of the line
+			local cfgAttribute [pick $cfgLine 0 [find $cfgLine "=" 0]]
+
+			#If the attribute matches the request
+			if ($cfgAttribute=$1) do={
+				#Initialize the configuration value
+				local cfgValue ""
+
+				#If the value is populated
+				if ([find $cfgLine "=" 0]!=[len $cfgLine]) do={
+					#Set the configuration value
+					set cfgValue [pick $cfgLine ([find $cfgLine "=" 0]+1) [len $cfgLine]]
+
+					#If the value is a boolean, properly convert it
+					if ($cfgValue="true") do={set cfgValue true}
+					if ($cfgValue="false") do={set cfgValue false}
+				}
+
+				#Return the requested configuration value
+				return $cfgValue
+			}
+
+			#Advance to the next line
+			set cfgLineStart ($cfgLineEnd+2)
+		} while ($cfgLineStart<[len $cfgFileContent])
+
+		#If this part has been reached, it means that the requested attribute was not found
+		#Exit
+		return ""
+	}
+
+	#Non-empty variable validator subfunction
+	#Inputs: <Array of variable names> <Array of variable values>
+	#Output: <Exit code>
+	local validateVars do={
+		#Error handling functions
+		local error do={local msg "[Provision][Error]: $1";put $msg;log error $msg;return -1}
+		local execStatus 0
+
+		#Iterate through the requested variables
+		foreach varIndex,cfgVar in=$1 do={
+			#If any of them are not specified or invalid
+			if (($2->$varIndex)="") do={
+				#Throw error and adjust execution status
+				set execStatus [$error ("The configuration variable $cfgVar cannot be left empty or contain an invalid value.")]
+			}
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#Error handling functions
+	local notify do={local msg "[Provision][Info]: $1";put $msg;log info $msg}
+	local error do={local msg "[Provision][Error]: $1";put $msg;log error $msg;return -1}
+	local execStatus 0
+
+	#If the configuration file does not exist
+	if ([/file find name~([/system identity get value-name=name].".cfg")]="") do={
+		#Throw error and exit
+		set execStatus [$error ("Unable to locate the config file, please upload it to the router and try again.")]
+		return $execStatus
+	}
+
+	#If function was called with argument "auto"
+	if ($1="auto" && [typeof $2]="nothing") do={
+		#Notify
+		$notify ("Provisioning all available modules.")
+
+		#Gain function access
+		global provision
+
+		#Iterate through the module inventory
+		local availCommands ""
+		local systemScripts {"mod-gateway";"mod-failover";"mod-dyndns";"mod-resolvefqdn";"mod-livestream"}
+		foreach cmdIndex,moduleName in={"gateways";"failover";"dyndns";"resolver";"livestream"} do={
+			#If any of the corresponding scripts are installed
+			if ([/system script find name=($systemScripts->$cmdIndex)]!="") do={
+				#Append their corresponding command to the provision commands string
+				set availCommands "$availCommands,$moduleName"
+			}
+		}
+
+		#Iterate through the available commands
+		foreach command in=[toarray $availCommands] do={
+			#Execute each command and if any error was encountered
+			if ([$provision $command]<0) do={
+				#Adjust the execution status
+				set execStatus -1
+			}
+		}
+
+		#If any errors occured
+		if ($execStatus<0) do={
+			#Throw error
+			$error ("Completed with errors.")
+		} else {
+			#Notify success
+			$notify ("Completed successfully.")
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If function was called with argument "purge"
+	if ($1="purge" && [typeof $2]="nothing") do={
+		#Notify
+		$notify ("Automatically purging provisioned configuration.")
+
+		#Construct an inventory of variable names belonging to each module
+		local varsLiveStream {"livestream";"LVStreamList";"LVStreamFQDN";"LVStreamRulePrefix"}
+		local varsResolver {"resolvefqdn"}
+		local varsDynDNS {"dyndns";"WANAddress";"DDNSService";"DDNSInterval";"DDNSUsername";"DDNSPassword";"DDNSHostname"}
+		local varsFailover {"failover";"FailoverCounters";"FailoverTarget";"FailoverThreshold";"FailoverInterval"}
+		local varsGateway {"gateway";"WANNames";"WANGateways";"WANGatewayPrefix";"BalancingRulePrefix"}
+		local moduleVars {$varsLiveStream;$varsResolver;$varsDynDNS;$varsFailover;$varsGateway}
+
+		#Iterate through the system scripts
+		foreach modIndex,systemScript in={"mod-livestream";"mod-resolvefqdn";"mod-dyndns";"mod-failover";"mod-gateway"} do={
+			#If any of them is not installed
+			if ([/system script find name=$systemScript]="") do={
+				#Iterate through its corresponding variables
+				foreach modVar in=($moduleVars->$modIndex) do={
+					#If it's a function variable that possesses a cron job
+					foreach varWithCron in={"dyndns";"failover"} do={
+						if ($modVar=$varWithCron) do={
+							#If it's currently active
+							if ([/system scheduler find disabled=no name="cron-$modVar"]!="") do={
+								#Disable it
+								execute ("global $modVar;\$$modVar toggle")
+
+								#Allow enough time for any additional actions to complete
+								delay 1
+							}
+
+							#Remove it
+							/system scheduler remove [find name="cron-$modVar"]
+						}
+					}
+					
+					#Clear their corresponding variables
+					execute ("global ".$modVar."; set ".$modVar)
+				}
+			}
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If function was called with argument "gateways"
+	if ($1="gateways" && [typeof $2]="nothing") do={
+		#Array duplicate checker subfunction
+		#Inputs: <Array of arrays>
+		#Output: <Duplicates flag>
+		local containsDuplicates do={
+			#Iterate through the requested arrays
+			foreach array in=$1 do={
+				#Iterate through each array element
+				foreach primaryElement in=$array do={
+					#Declare helper counter
+					local elementOccurences 0
+
+					#Iterate through each array element a second time
+					foreach secondaryElement in=$array do={
+						#If the element is found
+						if ($primaryElement=$secondaryElement) do={
+							#Adjust the helper counter
+							set elementOccurences ($elementOccurences+1)
+						}
+					}
+
+					#If an element has been found more than once
+					if ($elementOccurences>1) do={
+						#Exit
+						return true
+					}
+				}
+			}
+
+			#Exit
+			return false
+		}
+
+		#Notify
+		$notify ("Provisioning $1.")
+
+		#Request variables from config
+		global WANNames [toarray [$parseConfig "WANNames"]]
+		global WANGateways [toarray [$parseConfig "WANGateways"]]
+		global WANGatewayPrefix [$parseConfig "WANGatewayPrefix"]
+		global BalancingRulePrefix [$parseConfig "BalancingRulePrefix"]
+
+		#Validate that the mandatory variables are not empty
+		local cfgMandatoryVars {"WANNames";"WANGateways";"WANGatewayPrefix";"BalancingRulePrefix"}
+		local cfgMandatoryValues {$WANNames;$WANGateways;$WANGatewayPrefix;$BalancingRulePrefix}
+		set execStatus [$validateVars $cfgMandatoryVars $cfgMandatoryValues]
+
+		#If the WAN names or gateways contain duplicate values
+		local arrays {$WANNames;$WANGateways}
+		if ([$containsDuplicates $arrays]) do={
+			#Throw error and adjust execution status
+			set execStatus [$error ("Gateways configuration contains duplicate values.")]
+		}
+
+		#If the WAN name and gateway pairings are even
+		if ([len $WANNames]=[len $WANGateways]) do={
+			#Iterate through the gateways
+			foreach wanIndex,WANName in=$WANNames do={
+				#If it's assigned with a proper IP
+				if ([typeof [toip ($WANGateways->$wanIndex)]]="ip") do={
+					#If it does not have a corresponding default route
+					if ([/ip route find gateway=($WANGateways->$wanIndex) dst-address=0.0.0.0/0 comment~$WANGatewayPrefix]="") do={
+						#Throw error and adjust execution status
+						set execStatus [$error ("Gateways configuration for $WANName does not have a corresponding default route.")]
+					}
+				} else {
+					#Throw error and adjust execution status
+					set execStatus [$error ("Gateways configuration for $WANName contains an invalid IP address: ".($WANGateways->$wanIndex).".")]
+				}
+			}
+		} else {
+			#Throw error and adjust execution status
+			set execStatus [$error ("Gateways configuration is incomplete. Declared items are not evenly populated or may be enclosed in quotes.")]
+		}
+
+		#If any errors occured
+		if ($execStatus<0) do={
+			#Gain variable access
+			global gateway
+
+			#Clear all corresponding variables
+			set gateway
+			set WANNames
+			set WANGateways
+			set WANGatewayPrefix
+			set BalancingRulePrefix
+
+			#Throw error and adjust execution status
+			set execStatus [$error ("The $1 configuration is invalid, please check the config file and try again.")]
+		} else {
+			#If the function script is not installed
+			if ([/system script find name=mod-gateway]="") do={
+				#Throw error and adjust execution status
+				set execStatus [$error ("The gateway selector module script is missing, please install it and try again.")]
+			} else {
+				#Initialize function
+				/system script run mod-gateway
+			}
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If function was called with argument "failover"
+	if ($1="failover" && [typeof $2]="nothing") do={
+		#Notify
+		$notify ("Provisioning $1.")
+
+		#Request variables from config
+		global FailoverTarget [toip [$parseConfig "FailoverTarget"]]
+		global FailoverThreshold [tonum [$parseConfig "FailoverThreshold"]]
+		global FailoverInterval [tonum [$parseConfig "FailoverInterval"]]
+
+		#Validate that the mandatory variables are not empty
+		local cfgMandatoryVars {"FailoverTarget";"FailoverThreshold";"FailoverInterval"}
+		local cfgMandatoryValues {$FailoverTarget;$FailoverThreshold;$FailoverInterval}
+		set execStatus [$validateVars $cfgMandatoryVars $cfgMandatoryValues]
+
+		#If any errors occured
+		if ($execStatus<0) do={
+			#Gain variable access
+			global failover
+
+			#Clear all corresponding variables
+			set failover
+			set FailoverTarget
+			set FailoverThreshold
+			set FailoverInterval
+
+			#Throw error and adjust execution status
+			set execStatus [$error ("The $1 configuration is invalid, please check the config file and try again.")]
+		} else {
+			#If the function script is not installed
+			if ([/system script find name=mod-failover]="") do={
+				#Throw error and adjust execution status
+				set execStatus [$error ("The failover module script is missing, please install it and try again.")]
+			} else {
+				#Gain variable access
+				global gateway
+
+				#If the gateway function is not present
+				if ([typeof $gateway]="nothing") do={
+					#Throw error and adjust execution status
+					set execStatus [$error ("The failover module depends on the gateway selector module, please provision it and try again.")]
+				} else {
+					#Gain variable access
+					global WANNames
+
+					#Initialize the failover counters string
+					global FailoverCounters ""
+
+					#For every gateway
+					foreach WANName in=$WANNames do={
+						#Append an initialization value to it
+						set FailoverCounters "$FailoverCounters,0"
+					}
+
+					#Convert the failover counters string to an array
+					set FailoverCounters [toarray $FailoverCounters]
+
+					#Declare helper flag
+					local cronStatus true
+
+					#If the scheduler entry for the periodic failover checks exists
+					if ([/system scheduler find name=cron-failover]!="") do={
+						#Fetch its status
+						set cronStatus [/system scheduler get value-name=disabled [find name=cron-failover]]
+
+						#Remove it
+						/system scheduler remove [find name="cron-failover"]
+					}
+
+					#Re-add the scheduler entry
+					/system scheduler add name="cron-failover" interval=$FailoverInterval policy=read,write,policy,test disabled=$cronStatus on-event={global failover;$failover check}
+
+					#Initialize function
+					/system script run mod-failover
+				}
+			}
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If function was called with argument "dyndns"
+	if ($1="dyndns" && [typeof $2]="nothing") do={
+		#Notify
+		$notify ("Provisioning $1.")
+
+		#Request variables from config
+		global DDNSService [$parseConfig "DDNSService"]
+		global DDNSInterval [tonum [$parseConfig "DDNSInterval"]]
+		global DDNSUsername [$parseConfig "DDNSUsername"]
+		global DDNSPassword [$parseConfig "DDNSPassword"]
+		global DDNSHostname [$parseConfig "DDNSHostname"]
+
+		#Validate that the mandatory variables are not empty
+		local cfgMandatoryVars {"DDNSService";"DDNSInterval";"DDNSUsername";"DDNSPassword";"DDNSHostname"}
+		local cfgMandatoryValues {$DDNSService;$DDNSInterval;$DDNSUsername;$DDNSPassword;$DDNSHostname}
+		set execStatus [$validateVars $cfgMandatoryVars $cfgMandatoryValues]
+
+		#If any errors occured
+		if ($execStatus<0) do={
+			#Gain variable access
+			global dyndns
+
+			#Clear all corresponding variables
+			set dyndns
+			set DDNSService
+			set DDNSInterval
+			set DDNSUsername
+			set DDNSPassword
+			set DDNSHostname
+
+			#Throw error and adjust execution status
+			set execStatus [$error ("The $1 configuration is invalid, please check the config file and try again.")]
+		} else {
+			#If the function script is not installed
+			if ([/system script find name=mod-dyndns]="") do={
+				#Throw error and adjust execution status
+				set execStatus [$error ("The DynDNS updater module script is missing, please install it and try again.")]
+			} else {
+				#Declare helper flag
+				local cronStatus true
+
+				#If the scheduler entry for the periodic DynDNS updates exists
+				if ([/system scheduler find name=cron-dyndns]!="") do={
+					#Fetch its status
+					set cronStatus [/system scheduler get value-name=disabled [find name=cron-dyndns]]
+
+					#Remove it
+					/system scheduler remove [find name="cron-dyndns"]
+				}
+
+				#Re-add the scheduler entry
+				/system scheduler add name="cron-dyndns" interval=$DDNSInterval disabled=$cronStatus on-event={global dyndns;$dyndns update}
+
+				#Initialize function
+				/system script run mod-dyndns
+			}
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If function was called with argument "resolver"
+	if ($1="resolver" && [typeof $2]="nothing") do={
+		#Notify
+		$notify ("Provisioning $1.")
+
+		#If the function script is not installed
+		if ([/system script find name=mod-resolvefqdn]="") do={
+			#Throw error and adjust execution status
+			set execStatus [$error ("The FQDN resolver module script is missing, please install it and try again.")]
+		} else {
+			#Initialize function
+			/system script run mod-resolvefqdn
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If function was called with argument "livestream"
+	if ($1="livestream" && [typeof $2]="nothing") do={
+		#Notify
+		$notify ("Provisioning $1.")
+
+		#Request variables from config
+		global LVStreamList [$parseConfig "LVStreamList"]
+		global LVStreamFQDN [$parseConfig "LVStreamFQDN"]
+		global LVStreamRulePrefix [$parseConfig "LVStreamRulePrefix"]
+
+		#Validate that the mandatory variables are not empty
+		local cfgMandatoryVars {"LVStreamList";"LVStreamFQDN";"LVStreamRulePrefix"}
+		local cfgMandatoryValues {$LVStreamList;$LVStreamFQDN;$LVStreamRulePrefix}
+		set execStatus [$validateVars $cfgMandatoryVars $cfgMandatoryValues]
+
+		#If any errors occured
+		if ($execStatus<0) do={
+			#Gain variable access
+			global livestream
+
+			#Clear all corresponding variables
+			set livestream
+			set LVStreamList
+			set LVStreamFQDN
+			set LVStreamRulePrefix
+
+			#Throw error and adjust execution status
+			set execStatus [$error ("The $1 configuration is invalid, please check the config file and try again.")]
+		} else {
+			#If the function script is not installed
+			if ([/system script find name=mod-livestream]="") do={
+				#Throw error and adjust execution status
+				set execStatus [$error ("The live streaming module script is missing, please install it and try again.")]
+			} else {
+				#Gain variable access
+				global resolvefqdn
+
+				#If the resolvefqdn function is not present
+				if ([typeof $resolvefqdn]="nothing") do={
+					#Throw error and adjust execution status
+					set execStatus [$error ("The live streaming module depends on the FQDN resolver module, please provision it and try again.")]
+				} else {
+					#Initialize function
+					/system script run mod-livestream
+				}
+			}
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If this part has been reached, it means that no valid arguments were caught
+	#Respond on console with help message
+	put ("[Provision][Info]: incorrect arguments, try:")
+	put ("\$provision auto|purge|failover|gateways|dyndns|resolver|livestream")
+
+	#Exit with error
+	set execStatus -1
+	return $execStatus
+}

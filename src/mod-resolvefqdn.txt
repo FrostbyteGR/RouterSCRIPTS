@@ -1,0 +1,59 @@
+#FQDN resolver module script
+#Script permissions: read, write
+#Script dependencies: none
+#Extra requirements: at least one DNS server must be configured
+
+#Function declaration
+#Inputs: <FQDN> <Address List>
+global resolvefqdn do={
+	#Error handling functions
+	local error do={local msg "[FQDN Resolver][Error]: $1";put $msg;log error $msg;return -1}
+	local execStatus 0
+
+	#If there are no DNS servers configured
+	if ([/ip dns get value-name=servers]="") do={
+		#Throw error and exit
+		set execStatus [$error ("At least one DNS server must be configured.")]
+		return $execStatus
+	}
+
+	#If there are any existing address list entries
+	if ([len [/ip firewall address-list find list=$2]]>0) do={
+		#Remove them
+		/ip firewall address-list remove [find list=$2]
+	}
+
+	#Resolve the requested FQDN
+	resolve $1
+
+	#For every produced DNS record that was cached
+	foreach cachedRecord in=[/ip dns cache all find name=$1] do={
+		#If its an A record
+		if ([/ip dns cache all get value-name=type $cachedRecord]="A") do={
+			#Add it to the requested address list
+			/ip firewall address-list add list=$2 address=[/ip dns cache all get value-name=data $cachedRecord] comment=$1
+		}
+
+		#If its a CNAME record
+		if ([/ip dns cache all get value-name=type $cachedRecord]="CNAME") do={
+			#Declare helper pointers
+			local currCNAME [/ip dns cache all find name=$1 type="CNAME"]
+			local nextCNAME [/ip dns cache all find name=[/ip dns cache all get value-name=data $currCNAME] type="CNAME"]
+
+			#Keep navigating to the next node, until there are no more CNAME records
+			while ($nextCNAME!="") do={
+				set currCNAME $nextCNAME
+				set nextCNAME [/ip dns cache all find name=[/ip dns cache all get value-name=data $currCNAME] type="CNAME"]
+			}
+
+			#For every underlying A record
+			foreach ARecord in=[/ip dns cache all find name=[/ip dns cache all get value-name=data $currCNAME] type="A"] do={
+				#Add it to the requested address list
+				/ip firewall address-list add list=$2 address=[/ip dns cache all get value-name=data $ARecord] comment=$1
+			}
+		}
+	}
+
+	#Exit
+	return $execStatus
+}

@@ -1,0 +1,226 @@
+#Gateway selector module script
+#Script permissions: read, write
+#Script dependencies: mod-provision
+
+#Function declaration
+global gateway do={
+	#Error handling functions
+	local notify do={local msg "[Gateway Selector][Info]: $1";put $msg}
+	local warn do={local msg "[Gateway Selector][Warn]: $1";put $msg;log warn $msg}
+	local error do={local msg "[Gateway Selector][Error]: $1";put $msg;return -1}
+	local execStatus 0
+	
+	#Gain variable access
+	global WANNames
+	global WANGateways
+	global WANGatewayPrefix
+	global BalancingRulePrefix
+
+	#If function was called with argument "switch"
+	if ($1="switch" && [typeof $2]!="nothing" && [typeof $3]="nothing") do={
+		if ($2="Balancer") do={
+			#If there are no load balancing rules present
+			if ([/ip firewall mangle find comment~$BalancingRulePrefix]="") do={
+				#Throw error and exit
+				set execStatus [$error ("Cannot activate load balancing because there are no corresponding rules present.")]
+				return $execStatus
+			}
+
+			#Declare helper flag
+			local WANOutage false
+
+			#Iterate through the gateways
+			foreach WANGateway in=$WANGateways do={
+				#If there's at least one non-operational gateway
+				if ([/ip route get value-name=distance [find gateway=$WANGateway comment~$WANGatewayPrefix]]>[len $WANGateways]) do={
+					#Adjust the helper flag
+					set WANOutage true
+				}
+			}
+
+			#If there's a WAN outage
+			if ($WANOutage) do={
+				#If load balancing was not active prior the outage
+				if ([/ip firewall mangle find action=passthrough content="Failover" comment~$BalancingRulePrefix]="") do={
+					#Create semaphore rule
+					/ip firewall mangle add chain=input action=passthrough disabled=yes content="Failover" comment="$BalancingRulePrefix"
+
+					#Throw warning
+					$warn ("Load balancing has been selected and will be activated once WAN outage has been resolved.")
+				} else {
+					#Throw warning
+					$warn ("Load balancing is already selected, but will be activated once the WAN outage has been resolved.")
+				}
+			} else {
+				#If load balancing is currently active
+				if ([len [/ip firewall mangle find disabled=no comment~$BalancingRulePrefix]]>0) do={
+					#Notify
+					$notify ("Load balancing is already active.")
+				} else {
+					#Activate the load balancing rules
+					/ip firewall mangle set disabled=no [find comment~$BalancingRulePrefix]
+
+					#Notify
+					$notify ("Switched to: Load balancing")
+				}
+			}
+
+			#Exit
+			return $execStatus
+		}
+
+		#Iterate through the gateways
+		foreach wanIndex,WANName in=$WANNames do={
+			#If the requested gateway exists
+			if ($2=$WANName) do={
+				#Declare helper flags
+				local gatewayOperational true
+				local disabledBalancer false
+
+				#Fetch its distance
+				local requestedGatewayDistance [/ip route get value-name=distance [find gateway=($WANGateways->$wanIndex) comment~$WANGatewayPrefix]]
+
+				#If it's non-operational
+				if ($requestedGatewayDistance>[len $WANGateways]) do={
+					#Adjust for real distance
+					set requestedGatewayDistance ($requestedGatewayDistance-[len $WANGateways])
+
+					#Adjust helper flag
+					set gatewayOperational false
+				}
+
+				#If load balancing is currently active
+				if ([len [/ip firewall mangle find disabled=no comment~$BalancingRulePrefix]]>0) do={
+					#Deactivate the load balancing rules
+					/ip firewall mangle set disabled=yes [find comment~$BalancingRulePrefix]
+
+					#Adjust helper flag
+					set disabledBalancer true
+				}
+
+				#If load balancing was active prior a WAN outage
+				if ([/ip firewall mangle find action=passthrough content="Failover" comment~$BalancingRulePrefix]!="") do={
+					#Clean up semaphore rule
+					/ip firewall mangle remove [find action=passthrough content="Failover" comment~$BalancingRulePrefix]
+
+					#Adjust helper flag
+					set disabledBalancer true
+				}
+
+				#If it's already the default gateway
+				if ($requestedGatewayDistance=1) do={
+					#If load balancing was just disabled
+					if ($disabledBalancer) do={
+						#If it's operational
+						if ($gatewayOperational) do={
+							#Notify
+							$notify ("Switched to: $WANName")
+						} else {
+							#Throw warning
+							$warn ("$WANName has been selected and will be available once it regains WAN access.")
+						}
+					} else {
+						#If it's operational
+						if ($gatewayOperational) do={
+							#Notify
+							$notify ("$WANName is already the default gateway.")
+						} else {
+							#Throw warning
+							$warn ("$WANName is already selected, but will be available once it regains WAN access.")
+						}
+					}
+
+					#Exit
+					return $execStatus
+				}
+
+				#Iterate through the gateways
+				foreach WANGateway in=$WANGateways do={
+					#Fetch their distance information
+					local gatewayDistance [/ip route get value-name=distance [find gateway=$WANGateway comment~$WANGatewayPrefix]]
+
+					#If there are any non-operational ones
+					if ($gatewayDistance>[len $WANGateways]) do={
+						#Adjust for real distance
+						set gatewayDistance ($gatewayDistance-[len $WANGateways])
+					}
+
+					#For every gateway's default route that has a distance less than requested one
+					if ($gatewayDistance<$requestedGatewayDistance) do={
+						#Increase their distance by one
+						/ip route set distance=([/ip route get value-name=distance [find gateway=$WANGateway comment~$WANGatewayPrefix]]+1) [find gateway=$WANGateway comment~$WANGatewayPrefix]
+					}
+				}
+
+				#Set the minimum distance to one
+				local minDistance 1
+
+				#If it's non-operational
+				if (!$gatewayOperational) do={
+					#Set the minimum distance to the total number of gateways plus one
+					set minDistance ([len $WANGateways]+1)
+				}
+
+				#Set it as the default gateway
+				/ip route set distance=$minDistance [find gateway=($WANGateways->$wanIndex) comment~$WANGatewayPrefix]
+
+				#If it's operational
+				if ($gatewayOperational) do={
+					#Notify
+					$notify ("Switched to: $WANName")
+				} else {
+					#Throw warning
+					$warn ("$WANName has been selected and will be available once it regains WAN access.")
+				}
+
+				#Exit
+				return $execStatus
+			}
+		}
+
+		#If this part has been reached, it means that no valid gateway was caught
+		#Throw error and exit
+		set execStatus [$error ("Cannot switch to $2 because there's no such gateway declared in the config file.")]
+		return $execStatus
+	}
+
+	#If function was called with argument "status"
+	if ($1="status" && [typeof $2]="nothing") do={
+		#Find the gateway of least distance
+		local currGateway ""
+		local currMinDistance ([len $WANGateways]+1)
+		foreach wanIndex,WANName in=$WANNames do={
+			if ([/ip route get value-name=distance [find gateway=($WANGateways->$wanIndex) comment~$WANGatewayPrefix]]<$currMinDistance) do={
+				set currGateway $WANName
+				set currMinDistance [/ip route get value-name=distance [find gateway=($WANGateways->$wanIndex) comment~$WANGatewayPrefix]]
+			}
+		}
+
+		#If the gateway of least distance is non-operational
+		if ($currMinDistance>[len $WANGateways]) do={
+			#Throw warning
+			$warn ("All gateways are non-operational.")
+		} else {
+			#If load balancing is currently active
+			if ([len [/ip firewall mangle find disabled=no comment~$BalancingRulePrefix]]>0) do={
+				#Notify
+				$notify ("Currently via: Load balancing")
+			} else {
+				#Notify
+				$notify ("Currently via: $currGateway")
+			}
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If this part has been reached, it means that no valid arguments were caught
+	#Respond on console with help message
+	put ("[Gateway Selector][Info]: incorrect arguments, try:")
+	put ("\$gateway <switch Balancer|<WAN Name>>|status")
+
+	#Exit with error
+	set execStatus -1
+	return $execStatus
+}

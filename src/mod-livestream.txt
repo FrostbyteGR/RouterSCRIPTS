@@ -1,0 +1,82 @@
+#Live streaming module script
+#Script permissions: read, write
+#Script dependencies: mod-provision, mod-resolvefqdn
+
+#Function declaration
+global livestream do={
+	#Error handling functions
+	local notify do={local msg "[Live Streaming][Info]: $1";put $msg}
+	local error do={local msg "[Live Streaming][Error]: $1";put $msg;return -1}
+	local execStatus 0
+
+	#Gain variable access
+	global LVStreamList
+	global LVStreamFQDN
+	global LVStreamRulePrefix
+	global resolvefqdn
+
+	#If the FQDN resolver function is not present
+	if ([typeof $resolvefqdn]="nothing") do={
+		#Throw error and exit
+		set execStatus [$error ("The FQDN resolver function is missing. Please ensure that the module is installed and properly provisioned.")]
+		return $execStatus
+	}
+
+	#If there are no livestreaming rules present
+	if ([/ip firewall mangle find comment~$LVStreamRulePrefix]="") do={
+		#Throw error and exit
+		set execStatus [$error ("There are no corresponding rules present.")]
+		return $execStatus
+	}
+
+	#If function was called with "toggle" argument
+	if ($1="toggle" && [typeof $2]="nothing") do={
+		#If livestreaming mode is currently active
+		if ([len [/ip firewall mangle find disabled=no comment~$LVStreamRulePrefix]]>0) do={
+			#Deactivate its rules
+			/ip firewall mangle set disabled=yes [find comment~$LVStreamRulePrefix]
+
+			#Clear the streaming service address list entries
+			/ip firewall address-list remove [find list=$LVStreamList]
+
+			#Notify
+			$notify ("Disabled.")
+		} else {
+			#Resolve the streaming service FQDN into the corresponding address list
+			$resolvefqdn $LVStreamFQDN $LVStreamList
+
+			#Activate its rules
+			/ip firewall mangle set disabled=no [find comment~$LVStreamRulePrefix]
+
+			#Notify
+			$notify ("Enabled.")
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If function was called with argument "status"
+	if ($1="status" && [typeof $2]="nothing") do={
+		#If livestreaming mode is currently active
+		if ([len [/ip firewall mangle find disabled=no comment~$LVStreamRulePrefix]]>0) do={
+			#Notify
+			$notify ("Active.")
+		} else {
+			#Notify
+			$notify ("Inactive.")
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If this part has been reached, it means that no valid arguments were caught
+	#Respond on console with help message
+	put ("[Live Streaming][Info]: incorrect arguments, try:")
+	put ("\$livestream toggle|status")
+
+	#Exit with error
+	set execStatus -1
+	return $execStatus
+}

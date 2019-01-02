@@ -1,0 +1,299 @@
+#Failover module script
+#Script permissions: read, write
+#Script dependencies: mod-provision, mod-gateway
+
+#Function declaration
+global failover do={
+	#Error handling functions
+	local notify do={local msg "[Failover][Info]: $1";put $msg;log info $msg}
+	local warn do={local msg "[Failover][Warn]: $1";put $msg;log warn $msg}
+	local error do={local msg "[Failover][Error]: $1";put $msg;log error $msg;return -1}
+	local execStatus 0
+
+	#Gain variable access
+	global gateway
+	global WANNames
+	global WANGateways
+	global WANGatewayPrefix
+	global BalancingRulePrefix
+	global FailoverCounters
+	global FailoverTarget
+	global FailoverThreshold
+
+	#If the gateway selector function is not present
+	if ([typeof $gateway]="nothing") do={
+		#Throw error and exit
+		set execStatus [$error ("The gateway selector function is missing. Please ensure that the module is installed and properly provisioned.")]
+		return $execStatus
+	}
+
+	#If function was called with argument "check"
+	if ($1="check" && [typeof $2]="nothing") do={
+		#WAN availability evaluator subfunction
+		#Inputs: <WAN index>
+		local evaluateAvailability do={
+			#WAN interface locator subfunction
+			#Inputs: <Gateway address>
+			local locateWANInterface do={
+				#Iterate through the ip address entries
+				foreach entry in=[/ip address find] do={
+					#Fetch the address information
+					local entryAddress [/ip address get value-name=address $entry]
+
+					#If it contains a subnet mask
+					if ([typeof [find $entryAddress "/"]]="num") do={
+						#Convert the mask to octet format
+						local entryMask [toip (255.255.255.255<<(32-[pick $entryAddress ([find $entryAddress "/"]+1) [len $entryAddress]]))]
+
+						#Calculate the host range
+						local firstHost ([toip ([pick $entryAddress 0 ([find $entryAddress "/"])]&($entryMask))]+1)
+						local lastHost ([toip ([pick $entryAddress 0 ([find $entryAddress "/"])]|(~$entryMask))]-1)
+
+						#If the requested address exists within the host range
+						if ($1>=$firstHost && $1<=$lastHost) do={
+							#Return the name of the corresponding interface
+							return [/ip address get value-name=interface $entry]
+						}
+					}
+				}
+
+				#If this part has been reached, it means that no valid interface was caught
+				#Exit
+				return ""
+			}
+
+			#Error handling functions
+			local notify do={local msg "[Failover][Info]: $1";put $msg;log info $msg}
+			local warn do={local msg "[Failover][Warn]: $1";put $msg;log warn $msg}
+
+			#Gain variable access
+			global WANNames
+			global WANGateways
+			global WANGatewayPrefix
+			global BalancingRulePrefix
+			global FailoverCounters
+			global FailoverTarget
+			global FailoverThreshold
+
+			#Declare helper flag
+			local pingSuccessful false
+
+			#If the gateway points to a valid interface
+			local WANInterface [$locateWANInterface ($WANGateways->$1)]
+			if ($WANInterface!="") do={
+				#Ping the target through that interface and if it succeeds
+				if ([ping $FailoverTarget count=1 interface=$WANInterface]>0) do={
+					#Adjust helper flag
+					set pingSuccessful true
+				}
+			}
+
+			#If the gateway is operational
+			if ([/ip route get value-name=distance [find gateway=($WANGateways->$1) comment~$WANGatewayPrefix]]<=[len $WANGateways]) do={
+				#If the ping was successful
+				if ($pingSuccessful) do={
+					#If its counter had picked up any failures prior
+					if (($FailoverCounters->$1)>0) do={
+						#Set it to minus one
+						set ($FailoverCounters->$1) -1
+					} else {
+						#Reduce it by one
+						set ($FailoverCounters->$1) (($FailoverCounters->$1)-1)
+					}
+				} else {
+					#If its counter had not picked up any failures prior
+					if (($FailoverCounters->$1)<=0) do={
+						#Set it to one
+						set ($FailoverCounters->$1) 1
+					} else {
+						#Increase it by one
+						set ($FailoverCounters->$1) (($FailoverCounters->$1)+1)
+					}
+
+					#If its counter met the threshold
+					if (($FailoverCounters->$1)=$FailoverThreshold) do={
+						#Throw a warning
+						$warn ("WAN outage detected on ".($WANNames->$1).".")
+
+						#Increase its default route distance
+						/ip route set distance=([/ip route get value-name=distance [find gateway=($WANGateways->$1) comment~$WANGatewayPrefix]]+[/len $WANGateways]) [find gateway=($WANGateways->$1) comment~$WANGatewayPrefix]
+
+						#If load balancing is currently active
+						if ([len [/ip firewall mangle find disabled=no comment~$BalancingRulePrefix]]>0) do={
+							#Deactivate its rules
+							/ip firewall mangle set disabled=yes [find comment~$BalancingRulePrefix]
+
+							#Create semaphore rule
+							/ip firewall mangle add chain=input action=passthrough disabled=yes content="Failover" comment="$BalancingRulePrefix"
+
+							#Throw a warning
+							$warn ("Load balancing has been temporarily disabled until all gateways regain WAN access.")
+						}
+
+						#Declare helper flag
+						local WANOutage true
+
+						#Iterate through the gateways
+						foreach WANGateway in=$WANGateways do={
+							#If there's at least one that's operational
+							if ([/ip route get value-name=distance [find gateway=$WANGateway comment~$WANGatewayPrefix]]<=[len $WANGateways]) do={
+								#Adjust the helper flag
+								set WANOutage false
+							}
+						}
+
+						#If all gateways are non-operational
+						if ($WANOutage) do={
+							#Throw a warning
+							$warn ("WAN outage detected on all gateways.")
+						}
+					}
+					
+				}
+			} else {
+				#If the ping was successful
+				if ($pingSuccessful) do={
+					#Reset its counter to zero
+					set ($FailoverCounters->$1) 0
+
+					#Decrease its default route distance
+					/ip route set distance=([/ip route get value-name=distance [find gateway=($WANGateways->$1) comment~$WANGatewayPrefix]]-[/len $WANGateways]) [find gateway=($WANGateways->$1) comment~$WANGatewayPrefix]
+
+					#Notify
+					$notify ("Gateway ".($WANNames->$1)." regained WAN access.")
+
+					#Declare helper flag
+					local WANOutage false
+
+					#Iterate through the gateways
+					foreach WANGateway in=$WANGateways do={
+						#If there's at least one that's non-operational
+						if ([/ip route get value-name=distance [find gateway=$WANGateway comment~$WANGatewayPrefix]]>[len $WANGateways]) do={
+							#Adjust the helper flag
+							set WANOutage true
+						}
+					}
+
+					#If all gateways are operational
+					if (!$WANOutage) do={
+						#Notify
+						$notify ("All gateways have regained WAN access.")
+
+						#If load balancing was enabled prior the outage
+						if ([/ip firewall mangle find action=passthrough content="Failover" comment~$BalancingRulePrefix]!="") do={
+							#Clean up semaphore rule
+							/ip firewall mangle remove [find action=passthrough content="Failover" comment~$BalancingRulePrefix]
+
+							#Activate its rules
+							/ip firewall mangle set disabled=no [find comment~$BalancingRulePrefix]
+
+							#Notify
+							$notify ("Load balancing has been reactivated because it was previously enabled.")
+						}
+					}
+				} else {
+					#In case the device is coming off of a reboot and the failed gateway's counter has not yet met or surpassed the threshold
+					if (($FailoverCounters->$1)<$FailoverThreshold) do={
+						#Set it to the threshold
+						set ($FailoverCounters->$1) $FailoverThreshold
+					} else {
+						#Increase it by one
+						set ($FailoverCounters->$1) (($FailoverCounters->$1)+1)
+					}
+				}
+			}
+		}
+
+		#For every gateway
+		foreach wanIndex,WANName in=$WANNames do={
+			#Evaluate its availability
+			$evaluateAvailability $wanIndex
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If function was called with argument "toggle"
+	if ($1="toggle" && [typeof $2]="nothing") do={
+		#If the scheduler entry for the periodic failover checks is not enabled
+		if ([/system scheduler get value-name=disabled [find name=cron-failover]]) do={
+			#Enable it
+			/system scheduler set disabled=no [find name=cron-failover]
+
+			#Notify
+			$notify ("Enabled.")
+		} else {
+			#For every gateway
+			foreach WANGateway in=$WANGateways do={
+				#Which is non-operational
+				if ([/ip route get value-name=distance [find gateway=$WANGateway comment~$WANGatewayPrefix]]>[len $WANGateways]) do={
+					#Restore its distance
+					/ip route set distance=([/ip route get value-name=distance [find gateway=$WANGateway comment~$WANGatewayPrefix]]-[/len $WANGateways]) [find gateway=$WANGateway comment~$WANGatewayPrefix]
+				}
+			}
+
+			#If load balancing was enabled prior the outage
+			if ([/ip firewall mangle find content="Failover" comment~$BalancingRulePrefix]!="") do={
+				#Clean up semaphore rule
+				/ip firewall mangle remove [find action=passthrough content="Failover" comment~$BalancingRulePrefix]
+
+				#Activate its rules
+				/ip firewall mangle set disabled=no [find comment~$BalancingRulePrefix]				
+			}
+
+			#Disable it
+			/system scheduler set disabled=yes [find name=cron-failover]
+
+			#Notify
+			$notify ("Disabled.")
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If function was called with argument "status"
+	if ($1="status" && [typeof $2]="nothing") do={
+		#Error handling functions
+		local notifyCon do={local msg "[Failover][Info]: $1";put $msg}
+
+		#If the scheduler entry for the periodic failover checks is not enabled
+		if ([/system scheduler get value-name=disabled [find name=cron-failover]]) do={
+			#Notify
+			$notifyCon ("Failover status: Inactive.")
+		} else {
+			#Notify
+			$notifyCon ("Failover status: Active.")
+		}
+
+		#Declare helper string
+		local WANStatus
+
+		#Iterate through the failover counters
+		foreach wanIndex,WANName in=$WANNames do={
+			#If the counter value greater than zero
+			if (($FailoverCounters->$wanIndex)>0) do={
+				#Append the downtime estimation to the message
+				set WANStatus ("$WANName: Offline\t(down for at least ".(($FailoverCounters->$wanIndex)*[/system scheduler get value-name=interval [find name=cron-failover]]).")")
+			} else {
+				set WANStatus ("$WANName: Online\t(up for at least ".(($FailoverCounters->$wanIndex)*(-1)*[/system scheduler get value-name=interval [find name=cron-failover]]).")")
+			}
+
+			#Notify
+			$notifyCon $WANStatus
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If this part has been reached, it means that no valid arguments were caught
+	#Respond on console with help message
+	put ("[Failover][Info]: incorrect arguments, try:")
+	put ("\$failover check|toggle|status")
+
+	#Exit with error
+	set execStatus -1
+	return $execStatus
+}

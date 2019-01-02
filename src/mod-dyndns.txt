@@ -1,0 +1,99 @@
+#DynDNS updater module script
+#Script permissions: read, write
+#Script dependencies: mod-provision
+#Extra requirements: at least one DNS server must be configured
+
+#Function declaration
+global dyndns do={
+	#Error handling functions
+	local notify do={local msg "[DynDNS Updater][Info]: $1";put $msg;log info $msg}
+	local error do={local msg "[DynDNS Updater][Error]: $1";put $msg;log error $msg;return -1}
+	local execStatus 0
+
+	#If function was called with argument "update"
+	if ($1="update" && [typeof $2]="nothing") do={
+		#If there are no DNS servers configured
+		if ([/ip dns get value-name=servers]="") do={
+			#Throw error and exit
+			set execStatus [$error ("At least one DNS server must be configured.")]
+			return $execStatus
+		}
+
+		#Gain variable access
+		global DDNSService
+		global DDNSUsername
+		global DDNSPassword
+		global DDNSHostname
+		global WANAddress
+
+		#Declare helper string
+		local updateURL
+
+		#If the service is DynDNS
+		if ($DDNSService="DynDNS") do={
+			#Adjust the helper string
+			set updateURL "https://members.dyndns.org/v3/update"			
+		}
+
+		#If the service is NoIP
+		if ($DDNSService="NoIP") do={
+			#Adjust the helper string
+			set updateURL "https://dynupdate.no-ip.com/nic/update"
+		}
+
+		#If no valid service was specified
+		if ([typeof $updateURL]="nothing") do={
+			#Throw error and exit
+			set execStatus [$error ("Invalid service configured. Please use either DynDNS or NoIP in the config and try again.")]
+			return $execStatus
+		}
+
+		#Poll opendns.com to discover the current WAN address
+		local currWANAddress [toip [resolve myip.opendns.com server=resolver1.opendns.com]]
+
+		#If the stored WAN address is different from the one that was just fetched
+		if ($WANAddress!=$currWANAddress) do={
+			#Update the stored WAN address
+			set WANAddress $currWANAddress
+
+			#Notify
+			$notify ("New WAN Address detected: $WANAddress - Updating $DDNSService.")
+
+			#Update over HTTP
+			/tool fetch url=("$updateURL?hostname=$DDNSHostname&myip=$WANAddress") user=$DDNSUsername password=$DDNSPassword mode=https keep-result=no
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If function was called with argument "toggle"
+	if ($1="toggle" && [typeof $2]="nothing") do={
+		#If the scheduler entry for the periodic DynDNS updates is not enabled
+		if ([/system scheduler get value-name=disabled [find name=cron-dyndns]]) do={
+			#Enable it
+			/system scheduler set disabled=no [find name=cron-dyndns]
+
+			#Notify
+			$notify ("Enabled.")
+		} else {
+			#Disable it
+			/system scheduler set disabled=yes [find name=cron-dyndns]
+
+			#Notify
+			$notify ("Disabled.")
+		}
+
+		#Exit
+		return $execStatus
+	}
+
+	#If this part has been reached, it means that no valid arguments were caught
+	#Respond on console with help message
+	put ("[DynDNS][Info]: incorrect arguments, try:")
+	put ("\$dyndns update|toggle")
+
+	#Exit with error
+	set execStatus -1
+	return $execStatus
+}
