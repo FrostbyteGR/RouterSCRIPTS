@@ -4,7 +4,7 @@
 
 A collection of scripts for RouterBOARD devices
 
-Copyright (c) 2018 Frostbyte <frostbytegr@gmail.com>
+Copyright (c) 2019 Frostbyte <frostbytegr@gmail.com>
 
 ## II. CREDITS:
 
