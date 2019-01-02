@@ -1295,7 +1295,7 @@ local execStatus 0
 /system script run mod-provision
 
 #Cleanup
-/file remove [find name="Installer.rsc"]
+/file remove [find name="RouterSCRIPTS_Installer.rsc"]
 
 #Notify
 $notify ("Install finished. Assuming you have read through the supplied readme file, you may now remove any modules that you have no use for, then run: \$provision auto")

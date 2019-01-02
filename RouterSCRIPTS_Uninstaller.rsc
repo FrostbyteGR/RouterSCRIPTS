@@ -16,7 +16,7 @@ execute ("global provision;\$provision purge;set provision;global scriptsVersion
 #Cleanup
 /system script remove [find name="mod-provision"]
 /system scheduler remove [find name="init-provision"]
-/file remove [find name="Uninstaller.rsc"]
+/file remove [find name="RouterSCRIPTS_Uninstaller.rsc"]
 
 #Notify
 $notify ("Uninstall finished.")
