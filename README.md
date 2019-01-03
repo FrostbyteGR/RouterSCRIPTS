@@ -8,7 +8,8 @@ Copyright (c) 2019 Frostbyte <frostbytegr@gmail.com>
 
 ## II. CREDITS:
 
-* MikroTik wiki - orignal file parser code
+* Marisb @ MikroTik wiki - orignal file parser code
+* pablo @ MikroTik forum - original FQDN resolver code
 * hacki @ MikroTik forum - original DynDNS updater code
 
 ## III. FEATURES:
