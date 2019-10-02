@@ -8,7 +8,7 @@ Copyright (c) 2019 Frostbyte <frostbytegr@gmail.com>
 
 ## II. CREDITS:
 
-* Marisb @ MikroTik wiki - orignal file parser code
+* Marisb @ MikroTik wiki - original file parser code
 * pablo @ MikroTik forum - original FQDN resolver code
 * hacki @ MikroTik forum - original DynDNS updater code
 
@@ -22,7 +22,7 @@ Copyright (c) 2019 Frostbyte <frostbytegr@gmail.com>
 ## IV. AVAILABLE MODULES:
 
 * **Provision:** This is the core module responsible for the configuration and initialization of all other modules in this set
-* **Gateway Selector:** A module that simplifies on-demand load balancing or default gateway selection, for devicess handling multiple gateways
+* **Gateway Selector:** A module that simplifies on-demand load balancing or default gateway selection, for devices handling multiple gateways
 * **Failover:** A module for automatic default gateway swapping upon failure, for devices handling multiple gateways. Fully interoperable with the Gateway Selector module
 * **DynDNS Updater:** A module that simplifies dynamic DNS service updates
 * **FQDN Resolver:** A module that resolves fully qualified domain names to address lists
@@ -64,7 +64,7 @@ LVStreamRulePrefix=LVSTRM
 **WANGateways:** Comma separated list of default gateway addresses, as defined in your routing table. Must contain the same amount of entries as WANNames. Cannot contain spaces or duplicate values  
 **WANGatewayPrefix:** The comment prefix to use for identifying default gateway routes in the routing table  
 **BalancingRulePrefix:** The comment prefix to use for identifying load balancing rules in the mangle table. Must be defined even if no load balancing rules are present  
-**FailoverTarget:** The IP address used to determine gateway availability status (ping) during WAN availability checks  
+**FailoverTarget:** The IP address used to determine gateway availability status (via ping) during WAN availability checks  
 **FailoverThreshold:** The number of consecutive times a gateway can fail the WAN availability checks, before getting flagged as non-operational  
 **FailoverInterval:** The time (in seconds) between each WAN availability check, when automatic WAN availability checks are enabled  
 **DDNSService:** The dynamic DNS service provider. Can be configured as NoIP or DynDNS only  
