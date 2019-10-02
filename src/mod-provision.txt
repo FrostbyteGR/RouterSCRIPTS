@@ -3,7 +3,7 @@
 #Script dependencies: none
 
 #Declare scripts version
-global scriptsVersion "1.0.0"
+global scriptsVersion "1.0.1"
 
 #If the scheduler entry for the initialization of the provision module doesn't exist
 if ([/system scheduler find name=init-provision]="") do={
@@ -20,6 +20,10 @@ global provision do={
 		#Pull the configuration file contents
 		local cfgFileContent [/file get value-name=contents [find name~([/system identity get value-name=name].".cfg")]]
 
+		#Detect and adjust the configuration EOL sequence
+		local cfgEOLSequence "\n"
+		if ([typeof [find $cfgFileContent "\r\n" 0]]="num") do={set cfgEOLSequence "\r\n"}
+
 		#Declare helper pointers
 		local cfgLineStart 0
 		local cfgLineEnd 0
@@ -27,9 +31,9 @@ global provision do={
 		#Iterate through the configuration file contents
 		do {
 			#Find out where the line ends
-			set cfgLineEnd [find $cfgFileContent "\r\n" $cfgLineStart]
+			set cfgLineEnd [find $cfgFileContent $cfgEOLSequence $cfgLineStart]
 
-			#If a carriage return and new line cannot be found
+			#If an EOL sequence cannot be found
 			if ([typeof $cfgLineEnd]!="num") do={
 				#Adjust the line end to the end of contents
 				set cfgLineEnd [len $cfgFileContent]
@@ -61,7 +65,7 @@ global provision do={
 			}
 
 			#Advance to the next line
-			set cfgLineStart ($cfgLineEnd+2)
+			set cfgLineStart ($cfgLineEnd+[len $cfgEOLSequence])
 		} while ($cfgLineStart<[len $cfgFileContent])
 
 		#If this part has been reached, it means that the requested attribute was not found

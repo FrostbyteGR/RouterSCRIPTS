@@ -1,5 +1,5 @@
 # RouterSCRIPTS Installer
-# Version 1.0.0
+# Version 1.0.1
 
 #Error handling functions
 local notify do={local msg "[RouterSCRIPTS][Info]: $1";put $msg;log info $msg}
@@ -11,7 +11,7 @@ local execStatus 0
     \n#Script dependencies: none\r\
     \n\r\
     \n#Declare scripts version\r\
-    \nglobal scriptsVersion \"1.0.0\"\r\
+    \nglobal scriptsVersion \"1.0.1\"\r\
     \n\r\
     \n#If the scheduler entry for the initialization of the provision module doesn't exist\r\
     \nif ([/system scheduler find name=init-provision]=\"\") do={\r\
@@ -28,6 +28,10 @@ local execStatus 0
     \n\t\t#Pull the configuration file contents\r\
     \n\t\tlocal cfgFileContent [/file get value-name=contents [find name~([/system identity get value-name=name].\".cfg\")]]\r\
     \n\r\
+    \n\t\t#Detect and adjust the configuration EOL sequence\r\
+    \n\t\tlocal cfgEOLSequence \"\\n\"\r\
+    \n\t\tif ([typeof [find \$cfgFileContent \"\\r\\n\" 0]]=\"num\") do={set cfgEOLSequence \"\\r\\n\"}\r\
+    \n\r\
     \n\t\t#Declare helper pointers\r\
     \n\t\tlocal cfgLineStart 0\r\
     \n\t\tlocal cfgLineEnd 0\r\
@@ -35,9 +39,9 @@ local execStatus 0
     \n\t\t#Iterate through the configuration file contents\r\
     \n\t\tdo {\r\
     \n\t\t\t#Find out where the line ends\r\
-    \n\t\t\tset cfgLineEnd [find \$cfgFileContent \"\\r\\n\" \$cfgLineStart]\r\
+    \n\t\t\tset cfgLineEnd [find \$cfgFileContent \$cfgEOLSequence \$cfgLineStart]\r\
     \n\r\
-    \n\t\t\t#If a carriage return and new line cannot be found\r\
+    \n\t\t\t#If an EOL sequence cannot be found\r\
     \n\t\t\tif ([typeof \$cfgLineEnd]!=\"num\") do={\r\
     \n\t\t\t\t#Adjust the line end to the end of contents\r\
     \n\t\t\t\tset cfgLineEnd [len \$cfgFileContent]\r\
@@ -69,7 +73,7 @@ local execStatus 0
     \n\t\t\t}\r\
     \n\r\
     \n\t\t\t#Advance to the next line\r\
-    \n\t\t\tset cfgLineStart (\$cfgLineEnd+2)\r\
+    \n\t\t\tset cfgLineStart (\$cfgLineEnd+[len \$cfgEOLSequence])\r\
     \n\t\t} while (\$cfgLineStart<[len \$cfgFileContent])\r\
     \n\r\
     \n\t\t#If this part has been reached, it means that the requested attribute was not found\r\

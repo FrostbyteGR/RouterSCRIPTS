@@ -1,5 +1,5 @@
 # RouterSCRIPTS Uninstaller
-# Version 1.0.0
+# Version 1.0.1
 
 #Error handling functions
 local notify do={local msg "[RouterSCRIPTS][Info]: $1";put $msg;log info $msg}
